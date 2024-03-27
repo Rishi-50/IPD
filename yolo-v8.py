@@ -1,51 +1,48 @@
 import cv2
-from picamera2 import Picamera2
-import pandas as pd
-from ultralytics import YOLO
-import cvzone
+import numpy as np
 import pyttsx3
 import time
-import math
+from picamera import PiCamera
+from picamera.array import PiRGBArray
+from ultralytics import YOLO
 
 # Initialize pyttsx3 TTS engine
 engine = pyttsx3.init()
 
 # Initialize PiCamera
-picam2 = Picamera2()
-picam2.preview_configuration.main.size = (640, 480)
-picam2.preview_configuration.main.format = "RGB888"
-picam2.preview_configuration.align()
-picam2.configure("preview")
-picam2.start()
+camera = PiCamera()
+camera.resolution = (640, 480)
+camera.framerate = 30
+rawCapture = PiRGBArray(camera, size=(640, 480))
+
+# Warm-up camera
+time.sleep(2)
 
 # Load YOLO model
-model = YOLO('yolov8n.pt')
+model = YOLO('yolov5s.pt')
 
-# Load class list
-with open("coco.txt", "r") as file:
-    class_list = file.read().split("\n")
+# Object classes
+classNames = model.module.names
 
-# Camera parameters
+# Camera parameters (to be adjusted based on your camera and setup)
 KNOWN_WIDTH = 18  # Width of the object in cm (adjust according to your object)
 FOCAL_LENGTH = 640  # Focal length of the camera in pixels (adjust according to your camera)
 
-# Function to calculate distance
 def calculate_distance(known_width, focal_length, perceived_width):
-    return (known_width * focal_length) / perceived_width / 100  # Convert cm to meters
+    return (known_width * focal_length) / perceived_width / 100  # Divide by 100 to convert cm to meters
 
-# Main loop for object detection
-while True:
-    im = picam2.capture_array()
-    results = model.predict(im)
+for frame in camera.capture_continuous(rawCapture, format="bgr", use_video_port=True):
+    image = frame.array
+    results = model(image)
 
-    for det in results.pred[0]:
-        x1, y1, x2, y2, _, class_id, _ = det
+    for det in results.xyxy[0]:
+        x1, y1, x2, y2, _, class_id = det
         x1, y1, x2, y2 = map(int, [x1, y1, x2, y2])
-        class_name = class_list[int(class_id)]
+        class_name = classNames[int(class_id)]
         
         # Draw bounding box
-        cv2.rectangle(im, (x1, y1), (x2, y2), (0, 0, 255), 2)
-        cv2.putText(im, class_name, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+        cv2.rectangle(image, (x1, y1), (x2, y2), (0, 0, 255), 2)
+        cv2.putText(image, class_name, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
         
         # Calculate distance
         box_width = x2 - x1
@@ -60,7 +57,10 @@ while True:
         time.sleep(1)
 
     # Display the image
-    cv2.imshow("Camera", im)
+    cv2.imshow("Camera", image)
+    
+    # Clear the stream in preparation for the next frame
+    rawCapture.truncate(0)
     
     # Exit condition
     if cv2.waitKey(1) == ord('q'):
@@ -68,4 +68,4 @@ while True:
 
 # Cleanup
 cv2.destroyAllWindows()
-picam2.stop()
+camera.close()
