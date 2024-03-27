@@ -1,70 +1,71 @@
 import cv2
-import math
+from picamera2 import Picamera2
+import pandas as pd
 from ultralytics import YOLO
+import cvzone
+import pyttsx3
+import time
+import math
 
-# start webcam
-cap = cv2.VideoCapture(0)
-cap.set(3, 640)
-cap.set(4, 480)
+# Initialize pyttsx3 TTS engine
+engine = pyttsx3.init()
 
-# model
-model = YOLO("yolo-Weights/yolov8n.pt")
+# Initialize PiCamera
+picam2 = Picamera2()
+picam2.preview_configuration.main.size = (640, 480)
+picam2.preview_configuration.main.format = "RGB888"
+picam2.preview_configuration.align()
+picam2.configure("preview")
+picam2.start()
 
-# object classes
-classNames = [
-    "person", "bicycle", "car", "motorbike", "aeroplane", "bus", "train", "truck", "boat",
-    "traffic light", "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat",
-    "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella",
-    "handbag", "tie", "suitcase", "frisbee", "skis", "snowboard", "sports ball", "kite", "baseball bat",
-    "baseball glove", "skateboard", "surfboard", "tennis racket", "bottle", "wine glass", "cup",
-    "fork", "knife", "spoon", "bowl", "banana", "apple", "sandwich", "orange", "broccoli",
-    "carrot", "hot dog", "pizza", "donut", "cake", "chair", "sofa", "pottedplant", "bed",
-    "diningtable", "toilet", "tvmonitor", "laptop", "mouse", "remote", "keyboard", "cell phone",
-    "microwave", "oven", "toaster", "sink", "refrigerator", "book", "clock", "vase", "scissors",
-    "teddy bear", "hair drier", "toothbrush"
-]
+# Load YOLO model
+model = YOLO('yolov8n.pt')
 
+# Load class list
+with open("coco.txt", "r") as file:
+    class_list = file.read().split("\n")
+
+# Camera parameters
+KNOWN_WIDTH = 18  # Width of the object in cm (adjust according to your object)
+FOCAL_LENGTH = 640  # Focal length of the camera in pixels (adjust according to your camera)
+
+# Function to calculate distance
+def calculate_distance(known_width, focal_length, perceived_width):
+    return (known_width * focal_length) / perceived_width / 100  # Convert cm to meters
+
+# Main loop for object detection
 while True:
-    success, img = cap.read()
-    results = model(img, stream=True)
+    im = picam2.capture_array()
+    results = model.predict(im)
 
-    # coordinates
-    for r in results:
-        boxes = r.boxes
+    for det in results.pred[0]:
+        x1, y1, x2, y2, _, class_id, _ = det
+        x1, y1, x2, y2 = map(int, [x1, y1, x2, y2])
+        class_name = class_list[int(class_id)]
+        
+        # Draw bounding box
+        cv2.rectangle(im, (x1, y1), (x2, y2), (0, 0, 255), 2)
+        cv2.putText(im, class_name, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+        
+        # Calculate distance
+        box_width = x2 - x1
+        distance = calculate_distance(KNOWN_WIDTH, FOCAL_LENGTH, box_width)
+        
+        # Voice feedback
+        voice_feedback = f"{class_name} detected. Distance is {distance:.2f} meters."
+        engine.say(voice_feedback)
+        engine.runAndWait()
+        
+        # Pause for 1 second
+        time.sleep(1)
 
-        for box in boxes:
-            # bounding box
-            x1, y1, x2, y2 = box.xyxy[0]
-            x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)  # convert to int values
-
-            # put box in cam
-            cv2.rectangle(img, (x1, y1), (x2, y2), (255, 0, 255), 3)
-
-            # confidence
-            confidence = math.ceil((box.conf[0] * 100)) / 100
-            print("Confidence --->", confidence)
-
-            # class name
-            cls = int(box.cls[0])
-            print("Class name -->", classNames[cls])
-
-            # object details
-            org = [x1, y1]
-            font = cv2.FONT_HERSHEY_PLAIN
-            fontScale = 1
-            color = (255, 0, 0)
-            thickness = 2
-
-            # Display class name
-            cv2.putText(img, classNames[cls], org, font, fontScale, color, thickness)
-
-            # Display confidence
-            accuracy_text = f'Accuracy: {confidence}'
-            cv2.putText(img, accuracy_text, (x1, y1 - 10), font, fontScale, color, thickness)
-
-    cv2.imshow('Webcam', img)
+    # Display the image
+    cv2.imshow("Camera", im)
+    
+    # Exit condition
     if cv2.waitKey(1) == ord('q'):
         break
 
-cap.release()
+# Cleanup
 cv2.destroyAllWindows()
+picam2.stop()
