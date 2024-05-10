@@ -1,1 +1,5 @@
 pip install https://dl.google.com/coral/python/tflite_runtime-2.5.0-cp37-cp37m-linux_armv7l.whl
+
+  File "/home/rishi/Desktop/IPD/tensorflow-lite/tflite-custom-object-bookworm/detect.py", line 85, in run
+    image=cv2.resize(image,(640,480))
+cv2.error: OpenCV(4.9.0) /io/opencv/modules/imgproc/src/resize.cpp:4152: error: (-215:Assertion failed) !ssize.empty() in function 'resize'
