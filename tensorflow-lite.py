@@ -1,10 +1,10 @@
-# Import necessary libraries
 import time
 import numpy as np
 import cv2
 import mediapipe as mp
 from picamera.array import PiRGBArray
 from picamera import PiCamera
+import argparse
 
 # Global variables to calculate FPS
 COUNTER, FPS = 0, 0
