@@ -1,96 +1,118 @@
+import numpy as np
+import pyttsx3
 import cv2
 from picamera.array import PiRGBArray
 from picamera import PiCamera
-import pandas as pd
-import onnxruntime
-import cvzone
-import numpy as np
-import pyttsx3
 import time
 
-# Initialize pyttsx3 TTS engine
-engine = pyttsx3.init()
+def get_bboxes(image, path_to_onnx): 
+    YOLOWEIGHTS = path_to_onnx
+    model = cv2.dnn.readNetFromONNX(YOLOWEIGHTS)
+    
+    CLASSES = [
+        "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat", "traffic light",
+        "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat", "dog", "horse", "sheep", "cow",
+        "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella", "handbag", "tie", "suitcase", "frisbee",
+        "skis", "snowboard", "sports ball", "kite", "baseball bat", "baseball glove", "skateboard", "surfboard",
+        "tennis racket", "bottle", "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple",
+        "sandwich", "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair", "couch",
+        "potted plant", "bed", "dining table", "toilet", "tv", "laptop", "mouse", "remote", "keyboard",
+        "cell phone", "microwave", "oven", "toaster", "sink", "refrigerator", "book", "clock", "vase", "scissors",
+        "teddy bear", "hair drier", "toothbrush"
+    ]
 
-# Initialize the PiCamera
-camera = PiCamera()
-camera.resolution = (640, 480)
-camera.framerate = 30
-raw_capture = PiRGBArray(camera, size=(640, 480))
+    original_image = image
+    [height, width, _] = original_image.shape
+    length = max((height, width))
+    image = np.zeros((length, length, 3), np.uint8)
+    image[0:height, 0:width] = original_image
+    scale = length / 640
+    blob = cv2.dnn.blobFromImage(image, scalefactor=1 / 255, size=(640, 640), swapRB=False)
+    model.setInput(blob)
+    outputs = model.forward()
+    outputs = np.array([cv2.transpose(outputs[0])])
+    rows = outputs.shape[1]
+    boxes = []
+    scores = []
+    class_ids = []
+    
+    # Loop through the outputs
+    for i in range(rows):
+        classes_scores = outputs[0][i][4:]
+        (minScore, maxScore, minClassLoc, (x, maxClassIndex)) = cv2.minMaxLoc(classes_scores)
+        if maxScore >= 0.2:
+            box = [
+                outputs[0][i][0] - (0.5 * outputs[0][i][2]), outputs[0][i][1] - (0.5 * outputs[0][i][3]),
+                outputs[0][i][2], outputs[0][i][3]]
+            boxes.append(box)
+            scores.append(maxScore)
+            class_ids.append(maxClassIndex)
+    
+    conf_threshold = 0.5  # Confidence threshold
+    iou_threshold = 0.45   # IOU threshold
+    result_boxes = cv2.dnn.NMSBoxes(boxes, scores, conf_threshold,iou_threshold, 0.5)
+    
+    detections = []
+    classes_count = {}  # Dictionary to store class counts
 
-# Load the ONNX model
-model = onnxruntime.InferenceSession('yolov8n.onnx')
-my_file = open("coco.txt", "r")
-data = my_file.read()
-class_list = data.split("\n")
+    # Loop through the result boxes
+    for i in range(len(result_boxes)):
+        index = result_boxes[i][0]
+        class_id = class_ids[index]
+        class_name = CLASSES[class_id]
 
-# Camera parameters (to be adjusted based on your camera and setup)
-KNOWN_WIDTH = 2  # Width of the object in cm (adjust according to your object)
-FOCAL_LENGTH = 640  # Focal length of the camera in pixels (adjust according to your camera)
+        if class_name in classes_count:
+            classes_count[class_name] += 1
+        else:
+            classes_count[class_name] = 1
 
-# Initialize variables for object tracking
-prev_centroids = {}  # Dictionary to store centroids of objects in the previous frame
+        detection = {
+            'class_id': class_id,
+            'class_name': class_name,
+            'confidence': scores[index],
+            'box': boxes[index],
+            'scale': scale
+        }
+        detections.append(detection)
+        
+    return classes_count, detections
 
-# Function to calculate distance
-def calculate_distance(known_width, focal_length, object_width):
-    return (known_width * focal_length) / object_width   # Divide by 100 to convert cm to meters
+def text_to_speech(text):
+    engine = pyttsx3.init()
+    engine.say(text)
+    engine.runAndWait()
 
-# Function to calculate Euclidean distance
-def euclidean_distance(coord1, coord2):
-    return np.linalg.norm(np.array(coord1) - np.array(coord2))
+if __name__ == "__main__":
+    camera = PiCamera()
+    camera.resolution = (640, 480)
+    camera.framerate = 32
+    raw_capture = PiRGBArray(camera, size=(640, 480))
 
-# Start capturing video from the camera
-for frame in camera.capture_continuous(raw_capture, format="bgr", use_video_port=True):
-    # Grab the raw NumPy array representing the image
-    im = frame.array
+    time.sleep(0.1)
 
-    # Perform object detection
-    results = model.predict(im)
-    a = results[0].boxes.data
-    px = pd.DataFrame(a).astype("float")
+    for frame in camera.capture_continuous(raw_capture, format="bgr", use_video_port=True):
+        image = frame.array
 
-    curr_centroids = {}  # Dictionary to store centroids of objects in the current frame
+        classes_count, detections = get_bboxes(image, "yolov8n.onnx")
+        
+        for detection in detections:
+            class_name = detection['class_name']
+            count = classes_count[class_name]
+            text_to_speech(f"{count} {class_name}")
 
-    for index, row in px.iterrows():
-        x1, y1, x2, y2, d = map(int, row[:5])
-        c = class_list[d]
+        # Draw bounding boxes on the frame
+        for detection in detections:
+            box = detection['box']
+            x, y, w, h = [int(coord) for coord in box]
+            cv2.rectangle(image, (x, y), (x + w, y + h), (0, 255, 0), 2)
+            cv2.putText(image, detection['class_name'], (x, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+        
+        cv2.imshow('Object Detection', image)
+        key = cv2.waitKey(1) & 0xFF
 
-        cv2.rectangle(im, (x1, y1), (x2, y2), (0, 0, 255), 2)
-        cvzone.putTextRect(im, f'{c}', (x1, y1), 1, 1)
+        raw_capture.truncate(0)
 
-        # Calculate centroid of the bounding box
-        centroid = ((x1 + x2) // 2, (y1 + y2) // 2)
-        curr_centroids[c] = centroid  # Store centroid in current centroids dictionary
+        if key == ord('q'):
+            break
 
-        # Check if object was detected in previous frame
-        if c in prev_centroids:
-            # Calculate Euclidean distance between centroids
-            distance_px = euclidean_distance(prev_centroids[c], centroid)
-
-            # Calculate the width of the detected object
-            object_width = x2 - x1
-
-            # Convert distance from pixels to meters
-            distance = calculate_distance(KNOWN_WIDTH, FOCAL_LENGTH, object_width)
-
-            # Voice output for object and distance
-            voice_feedback = f"{c} detected. Distance is {distance:.2f} centimeters."
-            engine.say(voice_feedback)
-            engine.runAndWait()
-
-            time.sleep(2)
-
-    # Update previous centroids with current centroids for next iteration
-    prev_centroids = curr_centroids
-
-    # Display the frame
-    cv2.imshow("Camera", im)
-    key = cv2.waitKey(1) & 0xFF
-    if key == ord("q"):
-        break
-
-    # Clear the stream for the next frame
-    raw_capture.truncate(0)
-
-# Release the camera and close all OpenCV windows
-camera.close()
-cv2.destroyAllWindows()
+    cv2.destroyAllWindows()
