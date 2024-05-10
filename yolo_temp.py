@@ -1,78 +1,97 @@
 import cv2
-import numpy as np
+from picamera2 import Picamera2
+import pandas as pd
+#from ultralytics import YOLO
 import onnxruntime
-from picamera.array import PiRGBArray
-from picamera import PiCamera
+import cvzone
+import numpy as np
+import pyttsx3
+import time
 
-# Load the ONNX model
-onnx_model_path = "yolov4.onnx"
-session = onnxruntime.InferenceSession(onnx_model_path)
-input_name = session.get_inputs()[0].name
-output_names = [output.name for output in session.get_outputs()]
+# Initialize pyttsx3 TTS engine
+engine = pyttsx3.init()
 
-# Function to preprocess the image
-def preprocess(frame):
-    resized = cv2.resize(frame, (416, 416))
-    normalized = resized.astype(np.float32) / 255.0
-    return np.transpose(normalized, [2, 0, 1]).reshape(1, 3, 416, 416)
+picam2 = Picamera2()
+picam2.preview_configuration.main.size = (640,480)
+picam2.preview_configuration.main.format = "RGB888"
+picam2.preview_configuration.align()
+picam2.configure("preview")
+picam2.start()
+#model=YOLO('yolov8n.pt')
+#model.export(format='onnx')
+model=onnxruntime.InferenceSession('yolov8n.onnx')
+my_file = open("coco.txt", "r")
+data = my_file.read()
+class_list = data.split("\n")
+count=0
 
-# Function to postprocess the output
-def postprocess(outputs, frame):
-    boxes = []
-    confidences = []
-    class_ids = []
-    for output in outputs:
-        for detection in output:
-            scores = detection[5:]
-            class_id = np.argmax(scores)
-            confidence = scores[class_id]
-            if confidence > 0.5:
-                center_x = int(detection[0] * frame.shape[1])
-                center_y = int(detection[1] * frame.shape[0])
-                width = int(detection[2] * frame.shape[1])
-                height = int(detection[3] * frame.shape[0])
-                left = int(center_x - width / 2)
-                top = int(center_y - height / 2)
-                boxes.append([left, top, width, height])
-                confidences.append(float(confidence))
-                class_ids.append(int(class_id))
-    indices = cv2.dnn.NMSBoxes(boxes, confidences, score_threshold=0.5, nms_threshold=0.4)
-    if len(indices) > 0:
-        for i in indices.flatten():
-            box = boxes[i]
-            left, top, width, height = box
-            cv2.rectangle(frame, (left, top), (left + width, top + height), (0, 255, 0), 2)
-            cv2.putText(frame, f"{class_ids[i]}", (left, top - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-    return frame
+# Initialize variables for object tracking
+prev_centroids = {}  # Dictionary to store centroids of objects in the previous frame
 
-# Initialize the camera
-camera = PiCamera()
-camera.resolution = (640, 480)
-camera.framerate = 30
-raw_capture = PiRGBArray(camera, size=(640, 480))
+# Camera parameters (to be adjusted based on your camera and setup)
+KNOWN_WIDTH = 2  # Width of the object in cm (adjust according to your object)
+FOCAL_LENGTH = 640  # Focal length of the camera in pixels (adjust according to your camera)
 
-# Allow the camera to warm up
-time.sleep(0.1)
+def calculate_distance(known_width, focal_length, object_width):
+    return (known_width * focal_length) / object_width   # Divide by 100 to convert cm to meters
 
-for frame in camera.capture_continuous(raw_capture, format="bgr", use_video_port=True):
-    # Grab the raw NumPy array representing the image
-    image = frame.array
+def euclidean_distance(coord1, coord2):
+    return np.linalg.norm(np.array(coord1) - np.array(coord2))  # Compute Euclidean distance between two points
+
+while True:
+    im= picam2.capture_array()
     
-    # Perform inference
-    input_data = preprocess(image)
-    outputs = session.run(output_names, {input_name: input_data})
-    result_frame = postprocess(outputs, image)
+    count += 1
+    if count % 3 != 0:
+        continue
+    im=cv2.flip(im,-1)
+    results=model.predict(im)
+    a=results[0].boxes.data
+    px=pd.DataFrame(a).astype("float")
     
-    # Display the result
-    cv2.imshow("YOLOv4 Object Detection", result_frame)
-    key = cv2.waitKey(1) & 0xFF
-    
-    # Clear the stream for the next frame
-    raw_capture.truncate(0)
-    
-    # If the `q` key was pressed, break from the loop
-    if key == ord("q"):
+    curr_centroids = {}  # Dictionary to store centroids of objects in the current frame
+
+    for index,row in px.iterrows():
+        x1=int(row[0])
+        y1=int(row[1])
+        x2=int(row[2])
+        y2=int(row[3])
+        d=int(row[5])
+        c=class_list[d]
+        
+        cv2.rectangle(im,(x1,y1),(x2,y2),(0,0,255),2)
+        cvzone.putTextRect(im,f'{c}',(x1,y1),1,1)
+
+        # Calculate centroid of the bounding box
+        centroid = ((x1 + x2) // 2, (y1 + y2) // 2)
+        curr_centroids[c] = centroid  # Store centroid in current centroids dictionary
+
+        # Check if object was detected in previous frame
+        if c in prev_centroids:
+            # Calculate Euclidean distance between centroids
+            distance_px = euclidean_distance(prev_centroids[c], centroid)
+
+            # Calculate the width of the detected object
+            object_width = x2 - x1
+            #object_width = 200
+
+            # Convert distance from pixels to meters
+            distance = calculate_distance(KNOWN_WIDTH, FOCAL_LENGTH, object_width)
+
+            # Voice output for object and distance
+            voice_feedback = f"{c} detected. Distance is {distance:.2f} centimeters."
+            engine.say(voice_feedback)
+            engine.runAndWait()
+            
+            time.sleep(2)
+
+    # Update previous centroids with current centroids for next iteration
+    prev_centroids = curr_centroids
+
+    cv2.imshow("Camera", im)
+    if cv2.waitKey(1)==ord('q'):
         break
-
-# Clean up
 cv2.destroyAllWindows()
+
+
+
