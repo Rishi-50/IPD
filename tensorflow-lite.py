@@ -1,78 +1,140 @@
-import cv2
+# Import necessary libraries
+import time
 import numpy as np
-import tflite_runtime.interpreter as tflite
+import cv2
+import mediapipe as mp
+from picamera.array import PiRGBArray
+from picamera import PiCamera
 
-# Load the TFLite model and allocate tensors.
-interpreter = tflite.Interpreter(model_path="detect.tflite")
-interpreter.allocate_tensors()
+# Global variables to calculate FPS
+COUNTER, FPS = 0, 0
+START_TIME = time.time()
 
-# Get input and output tensors.
-input_details = interpreter.get_input_details()
-output_details = interpreter.get_output_details()
+def run(model: str, max_results: int, score_threshold: float, 
+        width: int, height: int) -> None:
+    """Continuously run inference on images acquired from the PiCamera.
 
-# Define the minimum confidence threshold for detections
-min_conf_threshold = 0.5
+    Args:
+      model: Name of the TFLite object detection model.
+      max_results: Max number of detection results.
+      score_threshold: The score threshold of detection results.
+      width: The width of the frame captured from the camera.
+      height: The height of the frame captured from the camera.
+    """
 
-# Define labels for the classes
-labels = ["person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck",
-          "boat", "traffic light", "fire hydrant", "stop sign", "parking meter", "bench",
-          "bird", "cat", "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra",
-          "giraffe", "backpack", "umbrella", "handbag", "tie", "suitcase", "frisbee",
-          "skis", "snowboard", "sports ball", "kite", "baseball bat", "baseball glove",
-          "skateboard", "surfboard", "tennis racket", "bottle", "wine glass", "cup", "fork",
-          "knife", "spoon", "bowl", "banana", "apple", "sandwich", "orange", "broccoli",
-          "carrot", "hot dog", "pizza", "donut", "cake", "chair", "couch", "potted plant",
-          "bed", "dining table", "toilet", "TV", "laptop", "mouse", "remote", "keyboard",
-          "cell phone", "microwave", "oven", "toaster", "sink", "refrigerator", "book",
-          "clock", "vase", "scissors", "teddy bear", "hair drier", "toothbrush"]
+    # Initialize PiCamera
+    camera = PiCamera()
+    camera.resolution = (width, height)
+    camera.framerate = 30
+    rawCapture = PiRGBArray(camera, size=(width, height))
 
-# Load the input image and resize it to match the input tensor shape
-cap = cv2.VideoCapture(0)
-cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+    # Wait for the camera to warm up
+    time.sleep(0.1)
 
-while True:
-    ret, frame = cap.read()
-    if not ret:
-        break
+    # Visualization parameters
+    row_size = 50  # pixels
+    left_margin = 24  # pixels
+    text_color = (0, 0, 0)  # black
+    font_size = 1
+    font_thickness = 1
+    fps_avg_frame_count = 10
 
-    # Preprocess the input image
-    input_data = cv2.resize(frame, (300, 300))
-    input_data = input_data[:, :, [2, 1, 0]]  # BGR to RGB
-    input_data = np.expand_dims(input_data, axis=0)
-    input_data = (input_data.astype(np.float32) - 127.5) / 127.5  # Normalize
+    detection_frame = None
+    detection_result_list = []
 
-    # Set the input tensor
-    interpreter.set_tensor(input_details[0]['index'], input_data)
+    def save_result(result: vision.ObjectDetectorResult, unused_output_image: mp.Image, timestamp_ms: int):
+        global FPS, COUNTER, START_TIME
 
-    # Perform inference
-    interpreter.invoke()
+        # Calculate the FPS
+        if COUNTER % fps_avg_frame_count == 0:
+            FPS = fps_avg_frame_count / (time.time() - START_TIME)
+            START_TIME = time.time()
 
-    # Get the output tensors
-    boxes = interpreter.get_tensor(output_details[0]['index'])
-    classes = interpreter.get_tensor(output_details[1]['index'])
-    scores = interpreter.get_tensor(output_details[2]['index'])
-    num_detections = int(interpreter.get_tensor(output_details[3]['index'])[0])
+        detection_result_list.append(result)
+        COUNTER += 1
 
-    # Draw bounding boxes on the input image
-    for i in range(num_detections):
-        if scores[0, i] > min_conf_threshold:
-            class_id = int(classes[0, i])
-            box = boxes[0, i]
-            ymin, xmin, ymax, xmax = box[0], box[1], box[2], box[3]
+    # Initialize the object detection model
+    base_options = python.BaseOptions(model_asset_path=model)
+    options = vision.ObjectDetectorOptions(base_options=base_options,
+                                           running_mode=vision.RunningMode.LIVE_STREAM,
+                                           max_results=max_results, score_threshold=score_threshold,
+                                           result_callback=save_result)
+    detector = vision.ObjectDetector.create_from_options(options)
 
-            # Convert bounding box coordinates to actual pixel values
-            (left, right, top, bottom) = (xmin * 640, xmax * 640, ymin * 480, ymax * 480)
+    # Continuously capture images from the PiCamera and run inference
+    for frame in camera.capture_continuous(rawCapture, format="bgr", use_video_port=True):
+        # Grab the raw NumPy array representing the image
+        image = frame.array
 
-            # Draw bounding box and label on the image
-            cv2.rectangle(frame, (int(left), int(top)), (int(right), int(bottom)), (0, 255, 0), thickness=2)
-            cv2.putText(frame, labels[class_id], (int(left), int(top) - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+        # Convert the image from BGR to RGB as required by the TFLite model.
+        rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_image)
 
-    # Display the output
-    cv2.imshow('Object Detection', frame)
+        # Run object detection using the model.
+        detector.detect_async(mp_image, time.time_ns() // 1_000_000)
 
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
+        # Show the FPS
+        fps_text = 'FPS = {:.1f}'.format(FPS)
+        text_location = (left_margin, row_size)
+        current_frame = image
+        cv2.putText(current_frame, fps_text, text_location, cv2.FONT_HERSHEY_DUPLEX,
+                    font_size, text_color, font_thickness, cv2.LINE_AA)
 
-cap.release()
-cv2.destroyAllWindows()
+        if detection_result_list:
+            # print(detection_result_list)
+            current_frame = visualize(current_frame, detection_result_list[0])
+            detection_frame = current_frame
+            detection_result_list.clear()
+
+        if detection_frame is not None:
+            cv2.imshow('object_detection', detection_frame)
+
+        # Clear the stream in preparation for the next frame
+        rawCapture.truncate(0)
+
+        # Stop the program if the ESC key is pressed.
+        if cv2.waitKey(1) == 27:
+            break
+
+    detector.close()
+    cv2.destroyAllWindows()
+
+def main():
+    parser = argparse.ArgumentParser(
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument(
+        '--model',
+        help='Path of the object detection model.',
+        required=False,
+#      default='efficientdet_lite0.tflite')
+        default='best.tflite')
+    parser.add_argument(
+        '--maxResults',
+        help='Max number of detection results.',
+        required=False,
+        default=5)
+    parser.add_argument(
+        '--scoreThreshold',
+        help='The score threshold of detection results.',
+        required=False,
+        type=float,
+        default=0.25)
+    parser.add_argument(
+        '--frameWidth',
+        help='Width of frame to capture from camera.',
+        required=False,
+        type=int,
+        default=640)
+    parser.add_argument(
+        '--frameHeight',
+        help='Height of frame to capture from camera.',
+        required=False,
+        type=int,
+        default=480)
+    args = parser.parse_args()
+
+    run(args.model, int(args.maxResults),
+        args.scoreThreshold, args.frameWidth, args.frameHeight)
+
+if __name__ == '__main__':
+    main()
